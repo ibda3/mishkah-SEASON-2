@@ -1,0 +1,2042 @@
+<!DOCTYPE html>
+<html lang="ar" dir="rtl">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+    <title>مسابقة مشكاة - غرفة التحكم والبث التلفزيوني</title>
+    <meta name="description" content="نظام مسابقات تلفزيوني احترافي فائق الأناقة والسرعة للربط اللحظي مع برنامج vMix">
+    <script src="https://cdn.tailwindcss.com"></script>
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=Amiri:wght@700&family=Cairo:wght@500;600;700;800;900&family=Tajawal:wght@400;500;700;800;900&display=swap" rel="stylesheet">
+    <script src="https://unpkg.com/react@18/umd/react.production.min.js"></script>
+    <script src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js"></script>
+    <script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/xlsx@0.18.5/dist/xlsx.full.min.js"></script>
+    <script>
+        tailwind.config = {
+            theme: {
+                extend: {
+                    colors: {
+                        studio: {
+                            base: '#040915',        // Deep studio broadcast dark
+                            surface: '#0B1528',     // Primary card surface
+                            elevated: '#11203D',    // Hover / raised panels
+                            subtle: '#16284D',      // Dividers / borders
+                            border: 'rgba(255, 255, 255, 0.08)',
+                            gold: '#F5A524',        // Brand gold accent
+                            goldHover: '#E0921B',
+                            goldMuted: 'rgba(245, 165, 36, 0.12)',
+                            emerald: '#10B981',     // Success / live / open
+                            rose: '#F43F5E',        // Danger / timer critical
+                            royal: '#2563EB',       // Answered indicator
+                            text: '#F8FAFC',        // High contrast readable white
+                            muted: '#94A3B8'        // Clean secondary text (≥14px)
+                        }
+                    },
+                    fontFamily: {
+                        tajawal: ['Tajawal', 'Cairo', 'sans-serif'],
+                        cairo: ['Cairo', 'sans-serif'],
+                        amiri: ['Amiri', 'serif']
+                    }
+                }
+            }
+        }
+    </script>
+    <style>
+        :root {
+            --font-main: 'Tajawal', 'Cairo', system-ui, sans-serif;
+        }
+        body {
+            font-family: var(--font-main);
+            background: #040915;
+            color: #F8FAFC;
+            margin: 0;
+            padding: 0;
+            min-height: 100vh;
+            line-height: 1.6;
+            -webkit-tap-highlight-color: transparent;
+        }
+
+        /* Clean Studio Elevation (fewer borders, rich subtle depth) */
+        .card-surface {
+            background-color: #0B1528;
+            border: 1px solid rgba(255, 255, 255, 0.07);
+            border-radius: 1.25rem;
+        }
+
+        .card-elevated {
+            background-color: #11203D;
+            border: 1px solid rgba(245, 165, 36, 0.2);
+            border-radius: 1.25rem;
+        }
+
+        /* Subtle focus glow */
+        .gold-glow {
+            box-shadow: 0 4px 20px -2px rgba(245, 165, 36, 0.25);
+        }
+
+        .emerald-glow {
+            box-shadow: 0 4px 20px -2px rgba(16, 185, 129, 0.25);
+        }
+
+        /* Smooth Drawer Transition */
+        .drawer-overlay {
+            background: rgba(0, 0, 0, 0.75);
+            backdrop-filter: blur(8px);
+        }
+
+        /* Timer alert pulsing & ring thickness */
+        @keyframes timerAlert {
+            0%, 100% { transform: scale(1); opacity: 1; }
+            50% { transform: scale(1.02); opacity: 0.9; }
+        }
+        @keyframes timerWarningAlert {
+            0%, 100% { transform: scale(1); opacity: 1; }
+            50% { transform: scale(1.01); opacity: 0.95; }
+        }
+        .timer-warning {
+            animation: timerWarningAlert 1.2s infinite ease-in-out;
+            box-shadow: 0 0 0 3px rgba(245, 158, 11, 0.55);
+        }
+        .timer-critical {
+            animation: timerAlert 0.7s infinite ease-in-out;
+            box-shadow: 0 0 0 4px rgba(244, 63, 94, 0.75);
+        }
+        .timer-normal {
+            box-shadow: 0 0 0 1px rgba(245, 165, 36, 0.25);
+        }
+
+        /* Clean scrollbar */
+        ::-webkit-scrollbar {
+            width: 6px;
+            height: 6px;
+        }
+        ::-webkit-scrollbar-track {
+            background: #040915;
+        }
+        ::-webkit-scrollbar-thumb {
+            background: #16284D;
+            border-radius: 9999px;
+        }
+        ::-webkit-scrollbar-thumb:hover {
+            background: #F5A524;
+        }
+    </style>
+</head>
+<body class="selection:bg-studio-gold selection:text-studio-base antialiased">
+    <div id="root"></div>
+
+    <script type="text/babel">
+        const { useState, useEffect, useRef } = React;
+        let serverOffset = 0;
+        const ADMIN_PASSWORD = "111";
+
+        // Answer extractors for backward compatibility
+        const extractChoice = (ans) => {
+            if (!ans) return "";
+            if (typeof ans === "string") return ans.trim().toUpperCase();
+            if (typeof ans === "object" && typeof ans.choice === "string") return ans.choice.trim().toUpperCase();
+            return "";
+        };
+
+        const extractTime = (ans) => {
+            if (!ans || typeof ans !== "object") return null;
+            return typeof ans.at === "number" ? ans.at : null;
+        };
+
+        // Server clock offset synchronization (NTP style)
+        const syncServerClock = async () => {
+            try {
+                const clientSend = Date.now();
+                const res = await fetch('/api/time?t=' + clientSend);
+                const clientRecv = Date.now();
+                const json = await res.json();
+                if (json.serverTime) {
+                    serverOffset = json.serverTime - Math.round((clientSend + clientRecv) / 2);
+                }
+            } catch (e) {}
+        };
+        // Run immediately on page load and periodically
+        syncServerClock();
+        setInterval(syncServerClock, 30000);
+
+        // Minimal, High-Readability Studio Icons
+        const Icons = {
+            Tv: () => <svg className="w-5 h-5 shrink-0" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth="2"><rect x="2" y="7" width="20" height="15" rx="3" ry="3"/><polyline points="17 2 12 7 7 2"/></svg>,
+            Play: () => <svg className="w-5 h-5 shrink-0" fill="currentColor" viewBox="0 0 24 24"><path d="M8 5v14l11-7z"/></svg>,
+            Stop: () => <svg className="w-5 h-5 shrink-0" fill="currentColor" viewBox="0 0 24 24"><rect x="6" y="6" width="12" height="12" rx="2"/></svg>,
+            ArrowRight: () => <svg className="w-5 h-5 shrink-0" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth="2.5"><path strokeLinecap="round" strokeLinejoin="round" d="M14 5l7 7m0 0l-7 7m7-7H3" /></svg>,
+            ArrowLeft: () => <svg className="w-5 h-5 shrink-0" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth="2.5"><path strokeLinecap="round" strokeLinejoin="round" d="M10 19l-7-7m0 0l7-7m-7 7h18" /></svg>,
+            Check: () => <svg className="w-5 h-5 shrink-0" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth="2.5"><path strokeLinecap="round" strokeLinejoin="round" d="M5 13l4 4L19 7" /></svg>,
+            Menu: () => <svg className="w-5 h-5 shrink-0" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth="2"><line x1="3" y1="12" x2="21" y2="12"/><line x1="3" y1="6" x2="21" y2="6"/><line x1="3" y1="18" x2="21" y2="18"/></svg>,
+            Close: () => <svg className="w-5 h-5 shrink-0" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth="2"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg>,
+            User: () => <svg className="w-5 h-5 shrink-0" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth="2"><path strokeLinecap="round" strokeLinejoin="round" d="M16 7a4 4 0 11-8 0 4 4 0 018 0zM12 14a7 7 0 00-7 7h14a7 7 0 00-7-7z" /></svg>,
+            Zap: () => <svg className="w-5 h-5 shrink-0" fill="currentColor" viewBox="0 0 24 24"><polygon points="13 2 3 14 12 14 11 22 21 10 12 10 13 2"/></svg>,
+            Clock: () => <svg className="w-5 h-5 shrink-0" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth="2"><circle cx="12" cy="12" r="10"/><polyline points="12 6 12 12 16 14"/></svg>,
+            Upload: () => <svg className="w-5 h-5 shrink-0" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth="2"><path strokeLinecap="round" strokeLinejoin="round" d="M4 16v1a3 3 0 003 3h10a3 3 0 003-3v-1m-4-8l-4-4m0 0L8 8m4-4v12" /></svg>,
+            Download: () => <svg className="w-5 h-5 shrink-0" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth="2"><path strokeLinecap="round" strokeLinejoin="round" d="M4 16v1a3 3 0 003 3h10a3 3 0 003-3v-1m-4-4l-4 4m0 0l-4-4m4 4V4" /></svg>,
+            Refresh: () => <svg className="w-4 h-4 shrink-0" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth="2"><path strokeLinecap="round" strokeLinejoin="round" d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15" /></svg>,
+            Edit: () => <svg className="w-4 h-4 shrink-0" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth="2"><path strokeLinecap="round" strokeLinejoin="round" d="M11 5H6a2 2 0 00-2 2v11a2 2 0 002 2h11a2 2 0 002-2v-5m-1.414-9.414a2 2 0 112.828 2.828L11.828 15H9v-2.828l8.586-8.586z" /></svg>,
+            Undo: () => <svg className="w-4 h-4 shrink-0" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth="2"><path strokeLinecap="round" strokeLinejoin="round" d="M3 10h10a5 5 0 015 5v2M3 10l6 6m-6-6l6-6"/></svg>
+        };
+
+        // Instant Studio Chime Synthesizer
+        const playChime = () => {
+            try {
+                const AudioCtx = window.AudioContext || window.webkitAudioContext;
+                if (!AudioCtx) return;
+                const ctx = new AudioCtx();
+                if (ctx.state === 'suspended') ctx.resume();
+                const now = ctx.currentTime;
+                const osc = ctx.createOscillator();
+                const gain = ctx.createGain();
+                osc.type = 'sine';
+                osc.frequency.setValueAtTime(587.33, now);
+                osc.frequency.exponentialRampToValueAtTime(880, now + 0.1);
+                gain.gain.setValueAtTime(0.3, now);
+                gain.gain.exponentialRampToValueAtTime(0.001, now + 0.35);
+                osc.connect(gain);
+                gain.connect(ctx.destination);
+                osc.start(now);
+                osc.stop(now + 0.36);
+            } catch (e) {}
+        };
+
+        // ==========================================
+        // 1. CONTESTANT TABLET VIEW (Touch First, 1m distance)
+        // ==========================================
+        const PlayerView = ({ getApiUrl, playerId }) => {
+            const [data, setData] = useState(null);
+            const [error, setError] = useState(null);
+            const [myAnswer, setMyAnswer] = useState(null);
+            const [loading, setLoading] = useState(false);
+            const [hasConfirmed, setHasConfirmed] = useState(false);
+            const [timeLeft, setTimeLeft] = useState(0);
+            const qIdRef = useRef(null);
+
+            const fetchStatus = async () => {
+                try {
+                    const apiUrl = getApiUrl('getStatus', { t: Date.now() });
+                    const res = await fetch(apiUrl);
+                    const json = await res.json();
+                    if (json.success) {
+                        setError(null);
+                        if (qIdRef.current !== json.data.status.currentQuestionId) {
+                            setMyAnswer(null);
+                            setHasConfirmed(false);
+                            qIdRef.current = json.data.status.currentQuestionId;
+                        }
+                        setData(json.data);
+                        const rawAns = json.data.status.playerAnswers[playerId - 1];
+                        const choice = extractChoice(rawAns);
+                        if (choice && !myAnswer) {
+                            setMyAnswer(choice);
+                            setHasConfirmed(true);
+                        }
+                    } else {
+                        setError(json.error || "تعذر قراءة البيانات");
+                    }
+                } catch (e) {
+                    setError("فشل الاتصال بالخادم المحلي");
+                }
+            };
+
+            useEffect(() => {
+                syncServerClock();
+                fetchStatus();
+                const inv = setInterval(fetchStatus, 1500);
+                return () => clearInterval(inv);
+            }, []);
+
+            // RequestAnimationFrame high precision timer loop (never a decrementing setInterval)
+            useEffect(() => {
+                let animId;
+                const update = () => {
+                    if (data?.status.isVotingOpen && data?.status.timerEnd) {
+                        const nowEstimated = Date.now() + serverOffset;
+                        const diffMs = data.status.timerEnd - nowEstimated;
+                        const sec = Math.max(0, Math.ceil(diffMs / 1000));
+                        setTimeLeft(sec);
+                    } else {
+                        setTimeLeft(0);
+                    }
+                    animId = requestAnimationFrame(update);
+                };
+                animId = requestAnimationFrame(update);
+                return () => cancelAnimationFrame(animId);
+            }, [data?.status.isVotingOpen, data?.status.timerEnd]);
+
+            const submit = async (choice) => {
+                if (myAnswer || !data?.status.isVotingOpen || loading || timeLeft === 0) return;
+                playChime();
+                setMyAnswer(choice);
+                setHasConfirmed(true);
+                setLoading(true);
+                try {
+                    const apiUrl = getApiUrl('submitAnswer', { playerId, answer: choice });
+                    const res = await fetch(apiUrl);
+                    const resJson = await res.json();
+                    if (resJson.rejected) {
+                        setMyAnswer(null);
+                        setHasConfirmed(false);
+                        alert("انتهى وقت الإجابة قبل وصول اختيارك إلى الخادم");
+                    }
+                } catch (e) {}
+                setLoading(false);
+            };
+
+            if (error) {
+                return (
+                    <div className="min-h-[85vh] flex items-center justify-center p-6 text-center">
+                        <div className="card-surface p-8 max-w-md w-full space-y-4">
+                            <h2 className="text-xl font-bold text-studio-gold">تعذر الاتصال بالبث</h2>
+                            <p className="text-sm text-studio-muted">{error}</p>
+                            <button onClick={fetchStatus} className="w-full min-h-[48px] bg-studio-gold hover:bg-studio-goldHover text-studio-base font-bold rounded-xl flex items-center justify-center gap-2 cursor-pointer text-base">
+                                <Icons.Refresh />
+                                <span>إعادة المحاولة الآن</span>
+                            </button>
+                        </div>
+                    </div>
+                );
+            }
+
+            if (!data) {
+                return (
+                    <div className="min-h-[85vh] flex flex-col items-center justify-center p-6 text-center space-y-4">
+                        <div className="w-12 h-12 rounded-full border-2 border-studio-gold border-t-transparent animate-spin"></div>
+                        <p className="text-studio-muted text-base">جاري مزامنة شاشة المقعد...</p>
+                    </div>
+                );
+            }
+
+            const rawPlayerName = data.playerNames?.[playerId - 1];
+            const playerName = (rawPlayerName && rawPlayerName.trim()) ? rawPlayerName.trim() : `المتسابق ${playerId}`;
+
+            // Standby for Segments 2 to 5
+            if (data.status.activeSegment && data.status.activeSegment !== 1) {
+                const segTitles = {
+                    2: "الفقرة الثانية · آيات بينات",
+                    3: "الفقرة الثالثة · اختر بابك",
+                    4: "الفقرة الرابعة · التحدي البصري",
+                    5: "الفقرة الخامسة · من أكون ؟"
+                };
+                return (
+                    <div className="min-h-[85vh] flex flex-col items-center justify-center p-6 text-center max-w-xl mx-auto space-y-6">
+                        <div className="w-20 h-20 rounded-2xl bg-studio-goldMuted border border-studio-gold/30 flex items-center justify-center text-studio-gold font-amiri font-bold text-4xl">
+                            م
+                        </div>
+                        <div className="space-y-2">
+                            <span className="text-sm font-bold text-studio-gold bg-studio-goldMuted px-3 py-1 rounded-full">
+                                {playerName} · المقعد {playerId}
+                            </span>
+                            <h1 className="text-2xl sm:text-3xl font-extrabold text-white">{segTitles[data.status.activeSegment] || "الفقرة الحالية"}</h1>
+                            <p className="text-studio-muted text-base leading-relaxed max-w-md">
+                                الفقرة الحالية تدار شفهياً مع مقدم المسابقة في الأستوديو. تفتح الخيارات تلقائياً عند فقرة السرعة.
+                            </p>
+                        </div>
+                    </div>
+                );
+            }
+
+            // Standby before start
+            if (!data.status.gameStarted) {
+                return (
+                    <div className="min-h-[85vh] flex flex-col items-center justify-center p-6 text-center max-w-lg mx-auto space-y-6">
+                        <div className="w-20 h-20 rounded-2xl bg-studio-elevated border border-studio-gold/30 flex items-center justify-center text-studio-gold font-bold text-3xl">
+                            {playerId}
+                        </div>
+                        <div>
+                            <h1 className="text-2xl sm:text-3xl font-extrabold text-white">{playerName}</h1>
+                            <p className="text-studio-muted text-sm mt-1">المقعد {playerId} · بانتظار إشارة انطلاق المسابقة من غرفة التحكم</p>
+                        </div>
+                        <div className="card-surface p-4 w-full flex items-center justify-between text-right">
+                            <div className="flex items-center gap-2.5">
+                                <span className="w-2.5 h-2.5 rounded-full bg-studio-emerald animate-pulse"></span>
+                                <span className="text-sm font-semibold text-white">الاتصال بالنظام مباشر</span>
+                            </div>
+                            <span className="text-xs font-bold text-studio-gold bg-studio-goldMuted px-3 py-1 rounded-lg">
+                                جاهز للانطلاق
+                            </span>
+                        </div>
+                    </div>
+                );
+            }
+
+            const totalScore = data.status.grandTotals ? data.status.grandTotals[playerId - 1] : (data.status.scores ? data.status.scores[playerId - 1] : 0);
+            const isVoting = data.status.isVotingOpen;
+            const options = [
+                { key: 'A', ar: 'أ', text: data.question?.a || "الخيار الأول" },
+                { key: 'B', ar: 'ب', text: data.question?.b || "الخيار الثاني" },
+                { key: 'C', ar: 'ج', text: data.question?.c || "الخيار الثالث" },
+                { key: 'D', ar: 'د', text: data.question?.d || "الخيار الرابع" }
+            ];
+
+            return (
+                <div className="max-w-3xl mx-auto p-4 sm:p-6 flex flex-col min-h-[calc(100vh-80px)] justify-between space-y-6 select-none">
+                    {/* Header Bar */}
+                    <div className="card-surface p-4 flex items-center justify-between gap-4">
+                        <div className="flex items-center gap-3">
+                            <div className="w-11 h-11 rounded-xl bg-studio-gold text-studio-base flex items-center justify-center font-black text-lg">
+                                {playerId}
+                            </div>
+                            <div>
+                                <div className="text-base font-extrabold text-white">{playerName}</div>
+                                <div className="text-xs text-studio-muted">
+                                    المقعد {playerId} · السؤال {data.status.currentQuestionId} من {data.status.totalQuestions}
+                                </div>
+                            </div>
+                        </div>
+
+                        {/* Total Score Badge */}
+                        <div className="flex items-center gap-2 bg-studio-elevated px-4 py-2 rounded-xl border border-white/5">
+                            <span className="text-xs text-studio-muted">المجموع:</span>
+                            <span className="text-xl font-black text-studio-gold font-mono">{totalScore}</span>
+                            <span className="text-xs text-studio-muted">نقطة</span>
+                        </div>
+                    </div>
+
+                    {/* Master Question Display */}
+                    <div className="card-surface p-8 sm:p-10 text-center flex-grow flex flex-col justify-center space-y-3">
+                        <span className="text-xs font-bold text-studio-gold tracking-wider">
+                            فقرة السرعة · السؤال {data.status.currentQuestionId}
+                        </span>
+                        <h2 className="text-2xl sm:text-3xl font-extrabold text-white leading-relaxed text-balance">
+                            {data.question?.text || "بانتظار السؤال من غرفة التحكم..."}
+                        </h2>
+                    </div>
+
+                    {/* High-Visibility Timer Bar with 3 Distinct Visual States */}
+                    {isVoting && data.status.timerEnd > 0 && (
+                        <div className={`card-surface p-4 transition-all rounded-2xl ${
+                            timeLeft <= 3 
+                                ? 'border-studio-rose bg-studio-rose/10 timer-critical' 
+                                : timeLeft <= 10 
+                                ? 'border-amber-500/70 bg-amber-500/10 timer-warning' 
+                                : 'border-studio-gold/30 timer-normal'
+                        }`}>
+                            <div className="flex items-center justify-between gap-4">
+                                <div className="flex items-center gap-3">
+                                    <div className={`w-12 h-12 rounded-xl flex items-center justify-center font-black text-2xl font-mono ${
+                                        timeLeft <= 3 
+                                            ? 'bg-studio-rose text-white' 
+                                            : timeLeft <= 10 
+                                            ? 'bg-amber-500 text-studio-base' 
+                                            : 'bg-studio-gold text-studio-base'
+                                    }`}>
+                                        {timeLeft}
+                                    </div>
+                                    <div className="text-right">
+                                        <div className="text-sm font-bold text-white">
+                                            {timeLeft === 0 ? 'انتهى الوقت المحدد' : timeLeft <= 3 ? 'لحظات أخيرة قبل الإغلاق!' : timeLeft <= 10 ? 'أسرع! الوقت يوشك على النفاذ' : 'الوقت المتبقي للاختيار'}
+                                        </div>
+                                        <div className="text-xs text-studio-muted">
+                                            {timeLeft === 0 ? 'تم إغلاق استقبال الإجابات رسمياً' : 'انقر على خيارك قبل انتهاء العداد'}
+                                        </div>
+                                    </div>
+                                </div>
+                                <div className={`text-2xl font-black font-mono ${
+                                    timeLeft <= 3 ? 'text-studio-rose' : timeLeft <= 10 ? 'text-amber-400' : 'text-white'
+                                }`}>
+                                    {timeLeft} ث
+                                </div>
+                            </div>
+                            <div className="w-full bg-studio-elevated h-2.5 rounded-full mt-3 overflow-hidden">
+                                <div
+                                    className={`h-full rounded-full transition-all duration-200 ease-linear ${
+                                        timeLeft <= 3 ? 'bg-studio-rose' : timeLeft <= 10 ? 'bg-amber-500' : 'bg-studio-gold'
+                                    }`}
+                                    style={{ width: `${Math.max(0, Math.min(100, (timeLeft / (data.status.timerDuration || 20)) * 100))}%` }}
+                                ></div>
+                            </div>
+                        </div>
+                    )}
+
+                    {/* Answer Locked Notification Banner */}
+                    {hasConfirmed && (
+                        <div className="p-3.5 rounded-xl bg-studio-emerald/15 border border-studio-emerald/40 text-center flex items-center justify-center gap-2 text-studio-emerald text-sm font-bold emerald-glow">
+                            <Icons.Check />
+                            <span>تم تثبيت إجابتك بنجاح ✓ · بانتظار إعلان النتيجة</span>
+                        </div>
+                    )}
+
+                    {/* 4 Large Touch Buttons in 2x2 Grid (Arabic letters only) */}
+                    <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
+                        {options.map(({ key, ar, text }) => {
+                            const isSelected = myAnswer === key;
+                            const isTimeUp = isVoting && data.status.timerEnd > 0 && timeLeft === 0;
+                            const isLockedState = !isVoting || isTimeUp || (myAnswer !== null);
+
+                            let buttonStyle = "min-h-[76px] p-5 rounded-2xl border text-right transition-all flex items-center justify-between cursor-pointer ";
+                            if (isSelected) {
+                                buttonStyle += "bg-studio-royal border-studio-gold text-white ring-2 ring-studio-gold shadow-lg";
+                            } else if (isLockedState) {
+                                buttonStyle += "bg-studio-surface/90 border-white/5 text-studio-muted opacity-75 cursor-not-allowed";
+                            } else {
+                                buttonStyle += "card-surface hover:bg-studio-elevated border-white/10 text-white hover:border-studio-gold/60 active:scale-[0.99]";
+                            }
+
+                            return (
+                                <button
+                                    key={key}
+                                    disabled={isLockedState}
+                                    onClick={() => submit(key)}
+                                    className={buttonStyle}
+                                >
+                                    <div className="flex items-center gap-4">
+                                        <div className={`w-12 h-12 rounded-xl flex items-center justify-center font-black text-xl shrink-0 ${isSelected ? 'bg-studio-gold text-studio-base' : 'bg-studio-elevated text-studio-gold border border-studio-gold/20'}`}>
+                                            {ar}
+                                        </div>
+                                        <span className="font-semibold text-lg leading-snug line-clamp-2">
+                                            {text}
+                                        </span>
+                                    </div>
+                                    {isSelected && (
+                                        <span className="text-xs font-black text-studio-gold bg-studio-base/80 px-2.5 py-1 rounded-lg">
+                                            اختيارك ✓
+                                        </span>
+                                    )}
+                                </button>
+                            );
+                        })}
+                    </div>
+                </div>
+            );
+        };
+
+        // ==========================================
+        // 2. DIRECTOR DASHBOARD (Focused Live Broadcast Room)
+        // ==========================================
+        const AdminView = ({ getApiUrl }) => {
+            const [status, setStatus] = useState(null);
+            const [playerNames, setPlayerNames] = useState([]);
+            const [question, setQuestion] = useState(null);
+            const [error, setError] = useState(null);
+            const [loading, setLoading] = useState(false);
+            const [timerDuration, setTimerDuration] = useState(20);
+            const [adminTimeLeft, setAdminTimeLeft] = useState(0);
+            const [vmixUrls, setVmixUrls] = useState({});
+            const [scoreNotice, setScoreNotice] = useState(null);
+
+            // Progressive Disclosure Drawers / Modals
+            const [isDrawerOpen, setIsDrawerOpen] = useState(false);
+            const [drawerTab, setDrawerTab] = useState('vmix'); // 'vmix' | 'names' | 'questions' | 'scenes'
+            const [copiedKey, setCopiedKey] = useState(null);
+            const [showStopConfirm, setShowStopConfirm] = useState(false);
+            const [namesEdit, setNamesEdit] = useState([]);
+            const [scoreEditMode, setScoreEditMode] = useState(false); // Protect +/- 10 buttons from accidental clicks
+            const [customModalPid, setCustomModalPid] = useState(null);
+            const [customPointsInput, setCustomPointsInput] = useState("15");
+
+            // Questions upload state
+            const [parsedQuestions, setParsedQuestions] = useState([]);
+            const [uploadFileName, setUploadFileName] = useState("");
+            const fileInputRef = useRef(null);
+
+            const fetchStatus = async () => {
+                try {
+                    const apiUrl = getApiUrl('getStatus', { t: Date.now() });
+                    const res = await fetch(apiUrl);
+                    const json = await res.json();
+                    if (json.success) {
+                        setError(null);
+                        setStatus(json.data.status);
+                        setQuestion(json.data.question);
+                        if (json.data.vmixUrls) setVmixUrls(json.data.vmixUrls);
+                        const sNames = json.data.playerNames || [];
+                        setPlayerNames(sNames);
+                        if (json.data.status?.timerDuration) setTimerDuration(json.data.status.timerDuration);
+                        if (namesEdit.length === 0 && sNames.length > 0) {
+                            setNamesEdit([...sNames]);
+                        }
+                    } else {
+                        setError(json.error || "خطأ غير معروف");
+                    }
+                } catch (e) {
+                    setError("فشل الاتصال بالخادم المحلي");
+                }
+            };
+
+            useEffect(() => {
+                fetchStatus();
+                const inv = setInterval(fetchStatus, 1500);
+                return () => clearInterval(inv);
+            }, []);
+
+            // Speed analytics: compute fastest correct answers and ties
+            const speedInfo = React.useMemo(() => {
+                if (!status || !status.playerAnswers) return { badges: {} };
+                const correctLetter = (question ? question.correct : status.correctAnswer || "").trim().toUpperCase();
+                const corrects = [];
+                for (let i = 0; i < 8; i++) {
+                    const ansObj = status.playerAnswers[i];
+                    const choice = extractChoice(ansObj);
+                    const at = extractTime(ansObj);
+                    if (choice && correctLetter && choice === correctLetter && at !== null) {
+                        corrects.push({ pIdx: i, at });
+                    }
+                }
+                const badges = {};
+                if (corrects.length > 0) {
+                    const minAt = Math.min(...corrects.map(c => c.at));
+                    const ties = corrects.filter(c => Math.abs(c.at - minAt) <= 50);
+                    if (ties.length > 1) {
+                        ties.forEach(t => {
+                            badges[t.pIdx] = { type: 'tie', label: 'تعادل ⚡' };
+                        });
+                    } else if (ties.length === 1) {
+                        badges[ties[0].pIdx] = { type: 'fastest', label: 'الأسرع ⚡' };
+                    }
+                }
+                return { badges };
+            }, [status?.playerAnswers, status?.correctAnswer, question?.correct]);
+
+            // Part 5 +/- direction toggle for each player (default 1 = positive)
+            const [part5Direction, setPart5Direction] = useState({ 1: 1, 2: 1, 3: 1, 4: 1, 5: 1, 6: 1, 7: 1, 8: 1 });
+            // Button tap confirmation feedback: key -> boolean (600ms checkmark)
+            const [btnFeedback, setBtnFeedback] = useState({});
+            // 3-second Undo Toast
+            const [undoToast, setUndoToast] = useState(null);
+            const undoTimerRef = useRef(null);
+            const lastTapRef = useRef(0);
+
+            // Countdown timer sync with requestAnimationFrame & serverOffset
+            useEffect(() => {
+                let animId;
+                const updateAdminTimer = () => {
+                    if (status?.isVotingOpen && status?.timerEnd) {
+                        const nowEstimated = Date.now() + serverOffset;
+                        const diffMs = status.timerEnd - nowEstimated;
+                        const diff = Math.max(0, Math.ceil(diffMs / 1000));
+                        setAdminTimeLeft(diff);
+                    } else {
+                        setAdminTimeLeft(0);
+                    }
+                    animId = requestAnimationFrame(updateAdminTimer);
+                };
+                animId = requestAnimationFrame(updateAdminTimer);
+                return () => cancelAnimationFrame(animId);
+            }, [status?.isVotingOpen, status?.timerEnd]);
+
+            const performAction = async (act, params = '') => {
+                setLoading(true);
+                try {
+                    const paramObj = {};
+                    if (params) {
+                        params.split('&').forEach(p => {
+                            if (!p) return;
+                            const [k, v] = p.split('=');
+                            paramObj[k] = v;
+                        });
+                    }
+                    const apiUrl = getApiUrl(act, paramObj);
+                    const res = await fetch(apiUrl);
+                    const json = await res.json();
+                    if (json.message) {
+                        setScoreNotice(json.message);
+                        setTimeout(() => setScoreNotice(null), 4000);
+                    }
+                    await fetchStatus();
+                } catch (e) {}
+                setLoading(false);
+            };
+
+            // Part-aware score change handler with debouncing, checkmark confirmation & 3-second undo toast
+            const handleScoreChange = async (btnKey, act, params, desc, undoAct, undoParams) => {
+                const now = Date.now();
+                if (now - lastTapRef.current < 400) return; // Debounce 400ms repeated taps
+                lastTapRef.current = now;
+
+                // Visual confirmation state: 600ms checkmark
+                setBtnFeedback(prev => ({ ...prev, [btnKey]: true }));
+                setTimeout(() => {
+                    setBtnFeedback(prev => ({ ...prev, [btnKey]: false }));
+                }, 600);
+
+                await performAction(act, params);
+
+                // 3-second Undo Toast
+                if (undoTimerRef.current) clearTimeout(undoTimerRef.current);
+                setUndoToast({
+                    desc,
+                    undo: async () => {
+                        await performAction(undoAct, undoParams);
+                        setUndoToast(null);
+                    }
+                });
+                undoTimerRef.current = setTimeout(() => {
+                    setUndoToast(null);
+                }, 3000);
+            };
+
+            const toggleGameStatus = async (shouldStart) => {
+                setLoading(true);
+                try {
+                    const apiUrl = getApiUrl('setGameStatus', { started: shouldStart, t: Date.now() });
+                    await fetch(apiUrl);
+                    setShowStopConfirm(false);
+                    await fetchStatus();
+                } catch (e) {}
+                setLoading(false);
+            };
+
+            const saveNames = async (custom) => {
+                const target = custom || namesEdit;
+                setLoading(true);
+                try {
+                    const res = await fetch('/api/updatePlayerNames', {
+                        method: 'POST',
+                        headers: { 'Content-Type': 'application/json' },
+                        body: JSON.stringify({ names: target })
+                    });
+                    const json = await res.json();
+                    if (json.success) {
+                        setPlayerNames([...target]);
+                        setScoreNotice("✓ تم حفظ أسماء المتسابقين وتحديث شاشات vMix فوراً");
+                        setTimeout(() => setScoreNotice(null), 4000);
+                        await fetchStatus();
+                    }
+                } catch (e) {
+                    alert("خطأ في حفظ الأسماء");
+                }
+                setLoading(false);
+            };
+
+            const resetNamesDefault = async () => {
+                const defaults = [
+                    "سمية أمير", "أسماء دليل", "لينة بن ناجي", "بسمة حلاب",
+                    "أيوب مصري", "أسامة الوناس", "زيد كموش", "راشدي ياسين"
+                ];
+                setNamesEdit(defaults);
+                await saveNames(defaults);
+            };
+
+            const copyUrl = (key, u) => {
+                if (!u) return;
+                navigator.clipboard.writeText(u).then(() => {
+                    setCopiedKey(key);
+                    setTimeout(() => setCopiedKey(null), 2500);
+                });
+            };
+
+            const handleExcelUpload = (e) => {
+                const file = e.target.files?.[0];
+                if (!file) return;
+                setUploadFileName(file.name);
+                const reader = new FileReader();
+                reader.onload = (evt) => {
+                    try {
+                        const data = new Uint8Array(evt.target.result);
+                        const workbook = window.XLSX.read(data, { type: 'array' });
+                        const targetSheetName = workbook.SheetNames.find(n => 
+                            n.toLowerCase().includes('question') || n.includes('أسئلة') || n.includes('اسئلة')
+                        ) || workbook.SheetNames[0];
+                        const worksheet = workbook.Sheets[targetSheetName];
+                        const rows = window.XLSX.utils.sheet_to_json(worksheet, { header: 1 });
+                        if (!rows || rows.length < 2) {
+                            alert("الملف فارغ أو لا يحتوي على صفوف بيانات!");
+                            return;
+                        }
+                        const headers = rows[0].map(h => String(h || "").trim().toLowerCase());
+                        let qIdx = headers.findIndex(h => h.includes('question') || h.includes('سؤال'));
+                        let aIdx = headers.findIndex(h => h === 'a' || h.includes('خيار أ'));
+                        let bIdx = headers.findIndex(h => h === 'b' || h.includes('خيار ب'));
+                        let cIdx = headers.findIndex(h => h === 'c' || h.includes('خيار ج'));
+                        let dIdx = headers.findIndex(h => h === 'd' || h.includes('خيار د'));
+                        let corrIdx = headers.findIndex(h => h.includes('correct') || h.includes('إجابة'));
+
+                        if (qIdx === -1) qIdx = 0;
+                        if (aIdx === -1) aIdx = 1;
+                        if (bIdx === -1) bIdx = 2;
+                        if (cIdx === -1) cIdx = 3;
+                        if (dIdx === -1) dIdx = 4;
+                        if (corrIdx === -1) corrIdx = 5;
+
+                        const extracted = [];
+                        for (let i = 1; i < rows.length; i++) {
+                            const r = rows[i];
+                            if (!r || !r[qIdx]) continue;
+                            extracted.push({
+                                id: extracted.length + 1,
+                                text: String(r[qIdx] || "").trim(),
+                                a: String(r[aIdx] || "").trim(),
+                                b: String(r[bIdx] || "").trim(),
+                                c: String(r[cIdx] || "").trim(),
+                                d: String(r[dIdx] || "").trim(),
+                                correct: String(r[corrIdx] || "A").trim().toUpperCase()
+                            });
+                        }
+                        setParsedQuestions(extracted);
+                    } catch (err) {
+                        alert("حدث خطأ في قراءة ملف الإكسل: " + err.message);
+                    }
+                };
+                reader.readAsArrayBuffer(file);
+            };
+
+            const commitQuestions = async () => {
+                if (parsedQuestions.length === 0) return;
+                setLoading(true);
+                try {
+                    const res = await fetch('/api/uploadQuestions', {
+                        method: 'POST',
+                        headers: { 'Content-Type': 'application/json' },
+                        body: JSON.stringify({ questions: parsedQuestions })
+                    });
+                    const json = await res.json();
+                    if (json.success) {
+                        setScoreNotice(`✓ تم حفظ ${json.count} سؤال وتحديث ملف الأسئلة`);
+                        setParsedQuestions([]);
+                        setUploadFileName("");
+                        await fetchStatus();
+                    }
+                } catch (e) {}
+                setLoading(false);
+            };
+
+            if (error) {
+                return (
+                    <div className="min-h-[80vh] flex items-center justify-center p-6 text-center">
+                        <div className="card-surface p-8 max-w-md w-full space-y-4">
+                            <h2 className="text-xl font-bold text-studio-gold">تعذر الاتصال بلوحة المخرج</h2>
+                            <p className="text-sm text-studio-muted">{error}</p>
+                            <button onClick={fetchStatus} className="w-full min-h-[44px] bg-studio-gold hover:bg-studio-goldHover text-studio-base font-bold rounded-xl cursor-pointer">
+                                إعادة الاتصال
+                            </button>
+                        </div>
+                    </div>
+                );
+            }
+
+            if (!status) {
+                return (
+                    <div className="min-h-[80vh] flex flex-col items-center justify-center p-6 text-center space-y-4">
+                        <div className="w-12 h-12 rounded-full border-2 border-studio-gold border-t-transparent animate-spin"></div>
+                        <p className="text-studio-muted text-base">جاري تجهيز غرفة التحكم المباشرة...</p>
+                    </div>
+                );
+            }
+
+            // Standby Launcher
+            if (!status.gameStarted) {
+                return (
+                    <div className="max-w-2xl mx-auto py-16 px-4 text-center">
+                        <div className="card-surface p-10 sm:p-12 space-y-6">
+                            <div className="w-20 h-20 rounded-2xl bg-studio-gold text-studio-base font-amiri font-bold text-4xl flex items-center justify-center mx-auto shadow-lg">
+                                م
+                            </div>
+                            <div>
+                                <span className="text-xs font-bold text-studio-gold tracking-widest">غرفة البث المباشر</span>
+                                <h1 className="text-3xl sm:text-4xl font-black text-white mt-1">مخرج مسابقة مشكاة</h1>
+                                <p className="text-studio-muted text-base mt-2 max-w-md mx-auto">
+                                    المنظومة جاهزة ومتصلة ببرنامج vMix لبث الإجابات والدرجات على الهواء لحظياً
+                                </p>
+                            </div>
+                            <div className="flex flex-col sm:flex-row gap-4 justify-center pt-2">
+                                <button
+                                    onClick={() => toggleGameStatus(true)}
+                                    disabled={loading}
+                                    className="min-h-[52px] px-8 bg-studio-gold hover:bg-studio-goldHover text-studio-base text-lg font-black rounded-xl shadow-xl gold-glow flex items-center justify-center gap-2 cursor-pointer active:scale-95"
+                                >
+                                    <Icons.Play />
+                                    <span>بدء المسابقة على الهواء ▶</span>
+                                </button>
+                                <button
+                                    onClick={() => { setIsDrawerOpen(true); setDrawerTab('questions'); }}
+                                    className="min-h-[52px] px-6 card-surface hover:bg-studio-elevated text-white font-bold rounded-xl flex items-center justify-center gap-2 cursor-pointer"
+                                >
+                                    <Icons.Upload />
+                                    <span>إعداد بنك الأسئلة</span>
+                                </button>
+                            </div>
+                        </div>
+                    </div>
+                );
+            }
+
+            const activeSeg = status.activeSegment || 1;
+            const isVoting = status.isVotingOpen;
+            const answeredCount = status.playerAnswers.filter(a => a && a.trim() !== "").length;
+            const isAlreadyAwarded = status.awardedQuestions?.includes(status.currentQuestionId);
+
+            // Compute the single primary focal action button
+            let primaryAction = null;
+            if (isVoting) {
+                primaryAction = {
+                    label: "إغلاق باب الإجابة ⏹",
+                    subtext: "إيقاف المؤقت وقفل إجابات المتسابقين",
+                    color: "bg-studio-rose hover:bg-rose-600 text-white",
+                    action: () => performAction('toggleVoting', '&open=false')
+                };
+            } else if (!isAlreadyAwarded) {
+                primaryAction = {
+                    label: "احتساب الدرجات (+10) ⚡",
+                    subtext: "تقييم الإجابات وإضافة 10 نقاط تلقائياً لـ vMix",
+                    color: "bg-studio-gold hover:bg-studio-goldHover text-studio-base gold-glow",
+                    action: () => performAction('updateScores')
+                };
+            } else {
+                primaryAction = {
+                    label: "السؤال التالي (←)",
+                    subtext: `الانتقال للسؤال ${Math.min(status.currentQuestionId + 1, status.totalQuestions)} وفتح بابه`,
+                    color: "bg-studio-emerald hover:bg-emerald-600 text-white emerald-glow",
+                    disabled: status.currentQuestionId >= status.totalQuestions,
+                    action: () => performAction('nextQuestion')
+                };
+            }
+
+            return (
+                <div className="max-w-[1720px] mx-auto px-4 sm:px-6 py-4 space-y-5">
+                    {/* 1. SLIM TOP BAR */}
+                    <header className="card-surface px-5 py-3 flex flex-wrap items-center justify-between gap-4">
+                        {/* Status Dots */}
+                        <div className="flex items-center gap-4">
+                            <div className="flex items-center gap-2">
+                                <span className="w-2.5 h-2.5 rounded-full bg-studio-emerald animate-pulse"></span>
+                                <span className="text-sm font-bold text-white">vMix متصل محلياً</span>
+                            </div>
+                            <span className="text-studio-muted">·</span>
+                            <div className="text-sm text-studio-muted">
+                                الإجابات المستلمة: <strong className="text-studio-gold font-bold font-mono text-base">{answeredCount}/8</strong>
+                            </div>
+                        </div>
+
+                        {/* Top Actions */}
+                        <div className="flex items-center gap-3">
+                            <button
+                                onClick={() => { setDrawerTab('vmix'); setIsDrawerOpen(true); }}
+                                className="min-h-[40px] px-4 rounded-xl text-sm font-bold card-surface hover:bg-studio-elevated text-studio-gold flex items-center gap-2 cursor-pointer transition-colors"
+                            >
+                                <Icons.Zap />
+                                <span>روابط vMix</span>
+                            </button>
+
+                            <button
+                                onClick={() => { setDrawerTab('names'); setIsDrawerOpen(true); }}
+                                className="min-h-[40px] px-4 rounded-xl text-sm font-bold card-surface hover:bg-studio-elevated text-white flex items-center gap-2 cursor-pointer transition-colors"
+                            >
+                                <Icons.User />
+                                <span>الأسماء والإعدادات</span>
+                            </button>
+
+                            <button
+                                onClick={() => setShowStopConfirm(true)}
+                                className="min-h-[40px] px-3.5 rounded-xl text-xs font-bold text-studio-rose hover:bg-studio-rose/10 transition-colors cursor-pointer"
+                            >
+                                إيقاف المسابقة
+                            </button>
+                        </div>
+                    </header>
+
+                    {/* 2. COMPACT SEGMENT TABS (5 Parts) */}
+                    <div className="flex items-center justify-between gap-2 overflow-x-auto p-1.5 card-surface">
+                        {[
+                            { id: 1, label: "الفقرة 1: السرعة (أسئلة)" },
+                            { id: 2, label: "الفقرة 2: آيات بينات (+20)" },
+                            { id: 3, label: "الفقرة 3: اختر بابك (+10)" },
+                            { id: 4, label: "الفقرة 4: التحدي البصري (+25)" },
+                            { id: 5, label: "الفقرة 5: من أكون ؟" },
+                        ].map(seg => (
+                            <button
+                                key={seg.id}
+                                onClick={() => performAction('setActiveSegment', `&segment=${seg.id}`)}
+                                className={`flex-1 min-h-[42px] px-4 rounded-xl text-sm font-bold transition-all whitespace-nowrap cursor-pointer ${
+                                    activeSeg === seg.id 
+                                        ? 'bg-studio-gold text-studio-base shadow-md font-black' 
+                                        : 'text-studio-muted hover:text-white hover:bg-studio-elevated'
+                                }`}
+                            >
+                                {seg.label}
+                            </button>
+                        ))}
+                    </div>
+
+                    {/* 3. MAIN WORKSPACE: TWO COLUMNS */}
+                    <div className="grid grid-cols-1 lg:grid-cols-12 gap-5">
+                        {/* MAIN COLUMN: Current Question & Single Action (8 cols) */}
+                        <div className="lg:col-span-8 card-surface p-6 sm:p-8 flex flex-col justify-between space-y-6">
+                            {/* Question Header */}
+                            <div className="flex items-center justify-between border-b border-white/5 pb-4">
+                                <div className="flex items-center gap-3">
+                                    <span className="bg-studio-elevated text-studio-gold px-3.5 py-1.5 rounded-xl text-sm font-black font-mono">
+                                        السؤال {status.currentQuestionId} من {status.totalQuestions}
+                                    </span>
+                                    <span className="text-sm text-studio-muted">فقرة الاختيارات المباشرة</span>
+                                </div>
+                                <div className="flex items-center gap-2">
+                                    <span className="text-xs text-studio-muted">الإجابة النموذجية:</span>
+                                    <span className="w-8 h-8 rounded-lg bg-studio-gold text-studio-base font-black flex items-center justify-center font-mono text-base">
+                                        {status.correctAnswer || '—'}
+                                    </span>
+                                </div>
+                            </div>
+
+                            {/* Question Body */}
+                            <div className="min-h-[80px] flex items-center">
+                                <h2 className="text-xl sm:text-2xl font-extrabold text-white leading-relaxed text-balance">
+                                    {question?.text || "لا توجد أسئلة مسجلة حالياً · يرجى رفع ملف من زر الأسئلة والإعدادات"}
+                                </h2>
+                            </div>
+
+                            {/* 4 Choices (Subtle indicator for correct answer) */}
+                            <div className="grid grid-cols-1 sm:grid-cols-2 gap-3.5">
+                                {['A', 'B', 'C', 'D'].map(k => {
+                                    const isCorrect = status.correctAnswer === k;
+                                    const text = question?.[k.toLowerCase()] || "---";
+                                    const arMap = { A: 'أ', B: 'ب', C: 'ج', D: 'د' };
+                                    return (
+                                        <div
+                                            key={k}
+                                            className={`p-4 rounded-xl border flex items-center justify-between transition-all ${
+                                                isCorrect
+                                                    ? 'bg-studio-emerald/10 border-studio-emerald/50 text-white'
+                                                    : 'bg-studio-surface border-white/5 text-studio-text'
+                                            }`}
+                                        >
+                                            <div className="flex items-center gap-3">
+                                                <span className={`w-8 h-8 rounded-lg flex items-center justify-center font-bold text-sm shrink-0 ${isCorrect ? 'bg-studio-emerald text-white' : 'bg-studio-elevated text-studio-gold'}`}>
+                                                    {arMap[k]}
+                                                </span>
+                                                <span className="text-base font-semibold truncate">{text}</span>
+                                            </div>
+                                            {isCorrect && (
+                                                <span className="text-xs text-studio-emerald font-bold px-2 py-0.5 rounded bg-studio-emerald/20">
+                                                    صحيحة ✓
+                                                </span>
+                                            )}
+                                        </div>
+                                    );
+                                })}
+                            </div>
+
+                            {/* FOCAL ACTION ROW */}
+                            <div className="pt-4 border-t border-white/5 flex flex-col sm:flex-row items-stretch sm:items-center gap-3.5">
+                                {/* Ghost Prev Button */}
+                                <button
+                                    onClick={() => performAction('prevQuestion')}
+                                    disabled={status.currentQuestionId <= 1}
+                                    className="min-h-[50px] px-4 card-surface hover:bg-studio-elevated disabled:opacity-30 text-studio-muted hover:text-white rounded-xl text-sm font-bold flex items-center justify-center gap-2 cursor-pointer transition-colors"
+                                >
+                                    <Icons.ArrowRight />
+                                    <span>السابق</span>
+                                </button>
+
+                                {/* THE SINGLE PRIMARY ACTION BUTTON */}
+                                <button
+                                    onClick={primaryAction.action}
+                                    disabled={primaryAction.disabled || loading}
+                                    className={`flex-1 min-h-[52px] px-6 rounded-xl text-base font-black flex items-center justify-center gap-2 shadow-lg active:scale-[0.99] transition-all cursor-pointer ${primaryAction.color} ${primaryAction.disabled ? 'opacity-40 cursor-not-allowed' : ''}`}
+                                >
+                                    <span>{primaryAction.label}</span>
+                                </button>
+
+                                {/* Quick "Open Voting" if closed & question not voting */}
+                                {!isVoting && !isAlreadyAwarded && (
+                                    <button
+                                        onClick={() => performAction('toggleVoting', `&open=true&duration=${timerDuration}`)}
+                                        className="min-h-[50px] px-5 bg-studio-emerald/20 hover:bg-studio-emerald text-studio-emerald hover:text-white border border-studio-emerald/40 rounded-xl text-sm font-bold flex items-center justify-center gap-2 cursor-pointer transition-all"
+                                    >
+                                        <Icons.Play />
+                                        <span>فتح باب الإجابة ({timerDuration}ث)</span>
+                                    </button>
+                                )}
+
+                                {/* Reset question score if already awarded */}
+                                {isAlreadyAwarded && (
+                                    <button
+                                        onClick={() => {
+                                            if (confirm(`هل تريد التراجع عن احتساب درجات السؤال ${status.currentQuestionId}؟`)) {
+                                                performAction('resetQuestionScore');
+                                            }
+                                        }}
+                                        className="min-h-[50px] px-4 card-surface hover:bg-studio-elevated text-studio-muted hover:text-white rounded-xl text-xs font-bold flex items-center justify-center gap-1.5 cursor-pointer"
+                                        title="تراجع عن احتساب هذا السؤال"
+                                    >
+                                        <Icons.Undo />
+                                        <span>تراجع</span>
+                                    </button>
+                                )}
+                            </div>
+                        </div>
+
+                        {/* SIDE COLUMN: Timer & Answers Received (4 cols) */}
+                        <div className="lg:col-span-4 space-y-5">
+                            {/* Huge Countdown Display */}
+                            <div className="card-surface p-6 flex flex-col justify-between space-y-4">
+                                <div className="flex items-center justify-between">
+                                    <span className="text-sm font-bold text-studio-muted flex items-center gap-1.5">
+                                        <Icons.Clock />
+                                        <span>مؤقت الإجابة</span>
+                                    </span>
+                                    {isVoting ? (
+                                        <span className="text-xs font-bold text-studio-emerald bg-studio-emerald/20 px-2.5 py-1 rounded-full animate-pulse">
+                                            مباشر على الهواء
+                                        </span>
+                                    ) : (
+                                        <span className="text-xs font-bold text-studio-muted bg-studio-elevated px-2.5 py-1 rounded-full">
+                                            المؤقت متوقف
+                                        </span>
+                                    )}
+                                </div>
+
+                                {/* Huge Digits with 3 Visual States */}
+                                <div className="text-center py-2">
+                                    <div className={`text-6xl sm:text-7xl font-black font-mono tracking-tight transition-all rounded-2xl py-2 ${
+                                        isVoting && adminTimeLeft <= 3 
+                                            ? 'text-studio-rose timer-critical ring-4 ring-rose-500/70' 
+                                            : isVoting && adminTimeLeft <= 10 
+                                            ? 'text-amber-400 timer-warning ring-2 ring-amber-500/50' 
+                                            : isVoting 
+                                            ? 'text-studio-gold timer-normal' 
+                                            : 'text-studio-muted'
+                                    }`}>
+                                        {isVoting ? adminTimeLeft : timerDuration}
+                                    </div>
+                                    <div className="text-xs text-studio-muted font-bold mt-1">
+                                        {isVoting 
+                                            ? (adminTimeLeft <= 3 ? 'لحظات أخيرة قبل الإغلاق!' : adminTimeLeft <= 10 ? 'أسرع! الوقت يوشك على النفاذ' : 'ثانية متبقية للإغلاق') 
+                                            : 'ثانية (المدة الافتراضية)'}
+                                    </div>
+                                </div>
+
+                                {/* Duration Preset Chips */}
+                                <div className="space-y-2 pt-2 border-t border-white/5">
+                                    <div className="text-xs text-studio-muted">تحديد المدة المحددة مسبقاً:</div>
+                                    <div className="grid grid-cols-6 gap-1.5">
+                                        {[10, 15, 20, 30, 45, 60].map(sec => (
+                                            <button
+                                                key={sec}
+                                                onClick={() => {
+                                                    setTimerDuration(sec);
+                                                    performAction('setTimerDuration', `&duration=${sec}`);
+                                                }}
+                                                className={`min-h-[36px] rounded-lg text-xs font-bold font-mono transition-all cursor-pointer ${
+                                                    timerDuration === sec
+                                                        ? 'bg-studio-gold text-studio-base font-black'
+                                                        : 'bg-studio-elevated text-studio-muted hover:text-white'
+                                                }`}
+                                            >
+                                                {sec}ث
+                                            </button>
+                                        ))}
+                                    </div>
+                                </div>
+
+                                {/* Live Timer Add Buttons */}
+                                {isVoting && (
+                                    <div className="flex gap-2 pt-1">
+                                        <button
+                                            onClick={() => performAction('addTimerSeconds', '&seconds=5')}
+                                            className="flex-1 min-h-[38px] rounded-xl bg-studio-elevated hover:bg-studio-subtle text-studio-gold text-xs font-bold cursor-pointer"
+                                        >
+                                            +5 ثوانٍ
+                                        </button>
+                                        <button
+                                            onClick={() => performAction('addTimerSeconds', '&seconds=10')}
+                                            className="flex-1 min-h-[38px] rounded-xl bg-studio-elevated hover:bg-studio-subtle text-studio-gold text-xs font-bold cursor-pointer"
+                                        >
+                                            +10 ثوانٍ
+                                        </button>
+                                    </div>
+                                )}
+                            </div>
+
+                            {/* Answers Received Large Indicator */}
+                            <div className="card-surface p-6 space-y-4">
+                                <div className="flex items-center justify-between">
+                                    <span className="text-sm font-bold text-studio-muted">الإجابات المكتملة</span>
+                                    <span className="text-xs font-bold text-studio-gold">
+                                        {Math.round((answeredCount / 8) * 100)}%
+                                    </span>
+                                </div>
+
+                                <div className="flex items-baseline justify-between">
+                                    <div className="text-4xl font-black font-mono text-white">
+                                        {answeredCount} <span className="text-xl text-studio-muted font-normal">/ 8</span>
+                                    </div>
+                                    <span className="text-xs text-studio-muted">
+                                        {answeredCount === 8 ? 'اكتملت جميع المقاعد ✓' : `متبقي ${8 - answeredCount} مقاعد`}
+                                    </span>
+                                </div>
+
+                                {/* Visual 8 Dots Indicator */}
+                                <div className="grid grid-cols-8 gap-2 pt-1">
+                                    {status.playerAnswers.map((ans, i) => {
+                                        const has = extractChoice(ans) !== "";
+                                        return (
+                                            <div
+                                                key={i}
+                                                className={`h-2.5 rounded-full transition-all ${has ? 'bg-studio-emerald' : 'bg-studio-elevated'}`}
+                                                title={`المقعد ${i + 1}: ${has ? 'تمت الإجابة' : 'بانتظار الإجابة'}`}
+                                            ></div>
+                                        );
+                                    })}
+                                </div>
+                            </div>
+                        </div>
+                    </div>
+
+                    {/* 4. CONTESTANTS BAR: 8 PART-AWARE CARDS */}
+                    <div className="card-surface p-6 space-y-4">
+                        <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 border-b border-white/5 pb-3">
+                            <div>
+                                <h3 className="text-base font-extrabold text-white flex items-center gap-2">
+                                    <Icons.User />
+                                    <span>المتسابقون الثمانية والتحكم في درجات الفقرة ({activeSeg === 1 ? 'الفقرة 1 · خيارات' : activeSeg === 2 ? 'الفقرة 2 · آيات (+20)' : activeSeg === 3 ? 'الفقرة 3 · الأبواب (+10)' : activeSeg === 4 ? 'الفقرة 4 · بصري (+25)' : 'الفقرة 5 · الحكام'})</span>
+                                </h3>
+                                <p className="text-xs text-studio-muted mt-0.5">
+                                    أزرار النقاط تتكيف تلقائياً مع الفقرة النشطة · انقر على صندوق الإجابة لإبراز المتسابق على vMix
+                                </p>
+                            </div>
+                            <div className="flex items-center gap-3">
+                                <span className="text-xs font-bold text-studio-gold bg-studio-goldMuted px-3 py-1.5 rounded-xl border border-studio-gold/20">
+                                    الفقرة النشطة: {activeSeg}
+                                </span>
+                            </div>
+                        </div>
+
+                        {/* 8 Cards Grid */}
+                        <div className="grid grid-cols-2 sm:grid-cols-4 lg:grid-cols-8 gap-3">
+                            {status.playerAnswers.map((ansObj, i) => {
+                                const pNum = i + 1;
+                                const pName = playerNames[i] || `المتسابق ${pNum}`;
+                                const choice = extractChoice(ansObj);
+                                const at = extractTime(ansObj);
+                                const hasAnswer = choice !== "";
+                                const correctLetter = (question ? question.correct : status.correctAnswer || "").trim().toUpperCase();
+                                const isCorrect = hasAnswer && correctLetter && choice === correctLetter;
+                                const grandTotal = status.grandTotals ? status.grandTotals[i] : 0;
+                                const isHighlighted = (status.selection?.blue?.[i] === 1) || (status.selection?.green?.[i] === 1);
+
+                                // Elapsed time from voting open
+                                let elapsed = null;
+                                if (at && status.votingOpenedAt) {
+                                    elapsed = Math.max(0, (at - status.votingOpenedAt) / 1000).toFixed(1) + "s";
+                                }
+
+                                // Fastest / Tie badge
+                                const badge = speedInfo.badges[i];
+
+                                // Part-specific score & door info
+                                const seg3Count = status.gameControl?.seg3Count?.[i] || 0;
+                                const hasSeg3Bonus = seg3Count === 7 || (status.gameControl?.seg3Bonus?.[i] || 0) > 0;
+                                let partScoreLabel = "";
+                                if (activeSeg === 1) partScoreLabel = `ف1: ${status.scores?.[i] || 0} ن`;
+                                else if (activeSeg === 2) partScoreLabel = `ف2: ${status.gameControl?.seg2?.[i] || 0} ن`;
+                                else if (activeSeg === 3) {
+                                    const p3Total = (status.gameControl?.seg3?.[i] || 0) + (status.gameControl?.seg3Bonus?.[i] || 0);
+                                    partScoreLabel = `ف3: ${p3Total} ن (${seg3Count}/7)`;
+                                }
+                                else if (activeSeg === 4) partScoreLabel = `ف4: ${status.gameControl?.seg4?.[i] || 0} ن`;
+                                else if (activeSeg === 5) partScoreLabel = `ف5: ${status.gameControl?.seg5?.[i] || 0} ن`;
+
+                                let ansBoxStyle = "bg-studio-surface border-white/10 text-studio-muted";
+                                if (isAlreadyAwarded && isCorrect) {
+                                    ansBoxStyle = "bg-studio-emerald/20 border-studio-emerald text-studio-emerald font-black";
+                                } else if (hasAnswer) {
+                                    ansBoxStyle = "bg-studio-royal/20 border-studio-royal text-studio-royal font-black";
+                                }
+
+                                const p5Dir = part5Direction[pNum] || 1;
+
+                                return (
+                                    <div
+                                        key={i}
+                                        className={`p-3.5 rounded-xl border flex flex-col items-center justify-between transition-all ${
+                                            isHighlighted 
+                                                ? 'border-studio-gold bg-studio-gold/10 gold-glow ring-2 ring-studio-gold/40' 
+                                                : 'card-surface border-white/5'
+                                        }`}
+                                    >
+                                        {/* Seat Header & vMix on-air badge */}
+                                        <div className="flex items-center justify-between w-full mb-1">
+                                            <span className="text-xs font-black text-studio-gold font-mono">P{pNum}</span>
+                                            {isHighlighted && (
+                                                <span className="text-[10px] font-bold text-studio-emerald bg-studio-emerald/20 px-1.5 py-0.5 rounded">
+                                                    على الهواء
+                                                </span>
+                                            )}
+                                        </div>
+
+                                        {/* Name (Trims cleanly) */}
+                                        <div className="text-xs font-bold text-white truncate w-full text-center mb-1" title={pName}>
+                                            {pName}
+                                        </div>
+
+                                        {/* 1-Click Answer Box + Speed Badge */}
+                                        <div className="flex flex-col items-center mb-2">
+                                            <button
+                                                onClick={() => performAction('toggleSelect', `&playerId=${pNum}`)}
+                                                className={`w-12 h-12 rounded-xl border flex flex-col items-center justify-center font-black transition-all cursor-pointer font-mono ${ansBoxStyle}`}
+                                                title="انقر للإبراز على شاشة vMix"
+                                            >
+                                                <span className="text-xl leading-none">{choice || '—'}</span>
+                                                {elapsed && (
+                                                    <span className="text-[9px] font-bold text-studio-muted font-mono leading-none mt-0.5">
+                                                        {elapsed}
+                                                    </span>
+                                                )}
+                                            </button>
+
+                                            {/* Fastest / Tie badge */}
+                                            {badge && (
+                                                <span className={`text-[10px] font-extrabold px-1.5 py-0.5 rounded shadow mt-1 animate-pulse ${
+                                                    badge.type === 'fastest' ? 'bg-studio-emerald text-white' : 'bg-studio-gold text-studio-base'
+                                                }`}>
+                                                    {badge.label}
+                                                </span>
+                                            )}
+                                        </div>
+
+                                        {/* Total Score & Part Score (Part score small, grand total large) */}
+                                        <div className="w-full bg-studio-elevated py-1.5 px-1.5 rounded-lg text-center mb-2.5">
+                                            <div className="text-[10px] text-studio-muted leading-tight">المجموع الكلي</div>
+                                            <div className="text-lg font-black text-studio-gold font-mono leading-none my-0.5">{grandTotal}</div>
+                                            <div className="text-[10px] font-bold text-studio-muted leading-tight mt-0.5 truncate">{partScoreLabel}</div>
+                                        </div>
+
+                                        {/* PART-AWARE CONTROLS (Green vs Red separated by >=12px gap, debounce & checkmark feedback) */}
+                                        <div className="w-full space-y-2">
+                                            {/* PART 1 CONTROLS */}
+                                            {activeSeg === 1 && (
+                                                <div className="space-y-1.5">
+                                                    <button
+                                                        onClick={() => handleScoreChange(
+                                                            `p1-add-${pNum}`,
+                                                            'adjustPlayerScore',
+                                                            `&playerId=${pNum}&delta=10`,
+                                                            `إضافة +10 للمتسابق (${pName})`,
+                                                            'adjustPlayerScore',
+                                                            `&playerId=${pNum}&delta=-10`
+                                                        )}
+                                                        className="w-full min-h-[34px] py-1 bg-studio-emerald hover:bg-emerald-600 text-white rounded-lg text-xs font-black flex items-center justify-center gap-1 cursor-pointer transition-all shadow"
+                                                    >
+                                                        {btnFeedback[`p1-add-${pNum}`] ? <Icons.Check /> : <span>+10</span>}
+                                                    </button>
+                                                    <div className="flex justify-center pt-1">
+                                                        <button
+                                                            onClick={() => handleScoreChange(
+                                                                `p1-sub-${pNum}`,
+                                                                'adjustPlayerScore',
+                                                                `&playerId=${pNum}&delta=-10`,
+                                                                `خصم -10 للمتسابق (${pName})`,
+                                                                'adjustPlayerScore',
+                                                                `&playerId=${pNum}&delta=10`
+                                                            )}
+                                                            className="w-full min-h-[28px] py-0.5 bg-studio-rose/20 hover:bg-studio-rose text-studio-rose hover:text-white rounded text-[11px] font-bold flex items-center justify-center gap-1 cursor-pointer transition-all"
+                                                            title="تصحيح: خصم 10 نقاط"
+                                                        >
+                                                            {btnFeedback[`p1-sub-${pNum}`] ? <Icons.Check /> : <span>−10</span>}
+                                                        </button>
+                                                    </div>
+                                                </div>
+                                            )}
+
+                                            {/* PART 2 CONTROLS (+20 primary, -20 secondary separated by >=12px) */}
+                                            {activeSeg === 2 && (
+                                                <div className="space-y-1.5">
+                                                    <button
+                                                        onClick={() => handleScoreChange(
+                                                            `p2-add-${pNum}`,
+                                                            'addSeg2',
+                                                            `&playerId=${pNum}`,
+                                                            `إضافة +20 للمتسابق (${pName})`,
+                                                            'subSeg2',
+                                                            `&playerId=${pNum}`
+                                                        )}
+                                                        className="w-full min-h-[34px] py-1 bg-studio-emerald hover:bg-emerald-600 text-white rounded-lg text-xs font-black flex items-center justify-center gap-1 cursor-pointer transition-all shadow"
+                                                    >
+                                                        {btnFeedback[`p2-add-${pNum}`] ? <Icons.Check /> : <span>+20</span>}
+                                                    </button>
+                                                    <div className="flex justify-center pt-1">
+                                                        <button
+                                                            onClick={() => handleScoreChange(
+                                                                `p2-sub-${pNum}`,
+                                                                'subSeg2',
+                                                                `&playerId=${pNum}`,
+                                                                `خصم -20 للمتسابق (${pName})`,
+                                                                'addSeg2',
+                                                                `&playerId=${pNum}`
+                                                            )}
+                                                            className="w-full min-h-[28px] py-0.5 bg-studio-rose/20 hover:bg-studio-rose text-studio-rose hover:text-white rounded text-[11px] font-bold flex items-center justify-center gap-1 cursor-pointer transition-all"
+                                                            title="تصحيح: خصم 20 نقطة"
+                                                        >
+                                                            {btnFeedback[`p2-sub-${pNum}`] ? <Icons.Check /> : <span>−20</span>}
+                                                        </button>
+                                                    </div>
+                                                </div>
+                                            )}
+
+                                            {/* PART 3 CONTROLS (Open door +10, door counter, auto +5 bonus) */}
+                                            {activeSeg === 3 && (
+                                                <div className="space-y-1.5">
+                                                    {hasSeg3Bonus && (
+                                                        <div className="text-[10px] font-black bg-studio-gold text-studio-base text-center py-0.5 rounded shadow animate-pulse">
+                                                            +5 بونص مكتمل ✓
+                                                        </div>
+                                                    )}
+                                                    <button
+                                                        onClick={() => handleScoreChange(
+                                                            `p3-add-${pNum}`,
+                                                            'addSeg3',
+                                                            `&playerId=${pNum}`,
+                                                            `فتح باب (+10) للمتسابق (${pName})`,
+                                                            'subSeg3',
+                                                            `&playerId=${pNum}`
+                                                        )}
+                                                        disabled={seg3Count >= 7}
+                                                        className="w-full min-h-[34px] py-1 bg-studio-emerald hover:bg-emerald-600 disabled:opacity-50 text-white rounded-lg text-xs font-black flex items-center justify-center gap-1 cursor-pointer transition-all shadow"
+                                                    >
+                                                        {btnFeedback[`p3-add-${pNum}`] ? (
+                                                            <Icons.Check />
+                                                        ) : (
+                                                            <span>فتح باب ({seg3Count}/7)</span>
+                                                        )}
+                                                    </button>
+                                                    <div className="flex justify-center pt-1">
+                                                        <button
+                                                            onClick={() => handleScoreChange(
+                                                                `p3-sub-${pNum}`,
+                                                                'subSeg3',
+                                                                `&playerId=${pNum}`,
+                                                                `غلق باب (-10) للمتسابق (${pName})`,
+                                                                'addSeg3',
+                                                                `&playerId=${pNum}`
+                                                            )}
+                                                            disabled={seg3Count <= 0}
+                                                            className="w-full min-h-[28px] py-0.5 bg-studio-rose/20 hover:bg-studio-rose disabled:opacity-40 text-studio-rose hover:text-white rounded text-[11px] font-bold flex items-center justify-center gap-1 cursor-pointer transition-all"
+                                                            title="غلق باب (خصم 10 نقاط)"
+                                                        >
+                                                            {btnFeedback[`p3-sub-${pNum}`] ? <Icons.Check /> : <span>غلق باب (−10)</span>}
+                                                        </button>
+                                                    </div>
+                                                </div>
+                                            )}
+
+                                            {/* PART 4 CONTROLS (+25 primary, -25 secondary separated by >=12px) */}
+                                            {activeSeg === 4 && (
+                                                <div className="space-y-1.5">
+                                                    <button
+                                                        onClick={() => handleScoreChange(
+                                                            `p4-add-${pNum}`,
+                                                            'addSeg4',
+                                                            `&playerId=${pNum}`,
+                                                            `إضافة +25 للمتسابق (${pName})`,
+                                                            'subSeg4',
+                                                            `&playerId=${pNum}`
+                                                        )}
+                                                        className="w-full min-h-[34px] py-1 bg-studio-emerald hover:bg-emerald-600 text-white rounded-lg text-xs font-black flex items-center justify-center gap-1 cursor-pointer transition-all shadow"
+                                                    >
+                                                        {btnFeedback[`p4-add-${pNum}`] ? <Icons.Check /> : <span>+25</span>}
+                                                    </button>
+                                                    <div className="flex justify-center pt-1">
+                                                        <button
+                                                            onClick={() => handleScoreChange(
+                                                                `p4-sub-${pNum}`,
+                                                                'subSeg4',
+                                                                `&playerId=${pNum}`,
+                                                                `خصم -25 للمتسابق (${pName})`,
+                                                                'addSeg4',
+                                                                `&playerId=${pNum}`
+                                                            )}
+                                                            className="w-full min-h-[28px] py-0.5 bg-studio-rose/20 hover:bg-studio-rose text-studio-rose hover:text-white rounded text-[11px] font-bold flex items-center justify-center gap-1 cursor-pointer transition-all"
+                                                            title="تصحيح: خصم 25 نقطة"
+                                                        >
+                                                            {btnFeedback[`p4-sub-${pNum}`] ? <Icons.Check /> : <span>−25</span>}
+                                                        </button>
+                                                    </div>
+                                                </div>
+                                            )}
+
+                                            {/* PART 5 CONTROLS (Judges: Direction toggle then 5/10/20 step buttons) */}
+                                            {activeSeg === 5 && (
+                                                <div className="space-y-1.5">
+                                                    {/* Direction Toggle */}
+                                                    <button
+                                                        onClick={() => setPart5Direction(prev => ({
+                                                            ...prev,
+                                                            [pNum]: (prev[pNum] || 1) === 1 ? -1 : 1
+                                                        }))}
+                                                        className={`w-full py-0.5 rounded text-[11px] font-black border transition-all cursor-pointer ${
+                                                            p5Dir === 1 
+                                                                ? 'bg-studio-emerald/20 border-studio-emerald text-studio-emerald' 
+                                                                : 'bg-studio-rose/20 border-studio-rose text-studio-rose'
+                                                        }`}
+                                                    >
+                                                        {p5Dir === 1 ? '+ إضافة نقاط' : '− خصم نقاط'}
+                                                    </button>
+
+                                                    {/* 3 Step Buttons: 5 / 10 / 20 */}
+                                                    <div className="grid grid-cols-3 gap-1 pt-0.5">
+                                                        {[5, 10, 20].map(step => {
+                                                            const deltaPts = p5Dir * step;
+                                                            return (
+                                                                <button
+                                                                    key={step}
+                                                                    onClick={() => handleScoreChange(
+                                                                        `p5-${step}-${pNum}`,
+                                                                        'addSeg5',
+                                                                        `&playerId=${pNum}&points=${deltaPts}`,
+                                                                        `تعديل ف5 (${deltaPts > 0 ? '+' : ''}${deltaPts}) للمتسابق (${pName})`,
+                                                                        'addSeg5',
+                                                                        `&playerId=${pNum}&points=${-deltaPts}`
+                                                                    )}
+                                                                    className={`min-h-[28px] rounded text-xs font-black cursor-pointer transition-all ${
+                                                                        p5Dir === 1 
+                                                                            ? 'bg-studio-elevated hover:bg-studio-emerald hover:text-white text-studio-text border border-white/5' 
+                                                                            : 'bg-studio-elevated hover:bg-studio-rose hover:text-white text-studio-rose border border-white/5'
+                                                                    }`}
+                                                                >
+                                                                    {btnFeedback[`p5-${step}-${pNum}`] ? '✓' : step}
+                                                                </button>
+                                                            );
+                                                        })}
+                                                    </div>
+                                                </div>
+                                            )}
+                                        </div>
+                                    </div>
+                                );
+                            })}
+                        </div>
+                    </div>
+
+                    {/* 5. COLLAPSIBLE PROGRESSIVE DISCLOSURE DRAWER */}
+                    {isDrawerOpen && (
+                        <div className="fixed inset-0 z-50 drawer-overlay flex justify-end">
+                            <div className="w-full max-w-xl bg-studio-surface border-r border-white/10 h-full p-6 flex flex-col justify-between overflow-y-auto animate-fade-in shadow-2xl">
+                                <div className="space-y-6">
+                                    {/* Drawer Header */}
+                                    <div className="flex items-center justify-between border-b border-white/5 pb-4">
+                                        <h3 className="text-lg font-black text-white flex items-center gap-2">
+                                            <span>أدوات البث والإعدادات</span>
+                                        </h3>
+                                        <button
+                                            onClick={() => setIsDrawerOpen(false)}
+                                            className="w-8 h-8 rounded-lg bg-studio-elevated text-studio-muted hover:text-white flex items-center justify-center cursor-pointer"
+                                        >
+                                            <Icons.Close />
+                                        </button>
+                                    </div>
+
+                                    {/* Drawer Nav Tabs */}
+                                    <div className="flex gap-2 p-1 bg-studio-base rounded-xl">
+                                        {[
+                                            { key: 'vmix', label: 'روابط vMix' },
+                                            { key: 'names', label: 'أسماء المتسابقين' },
+                                            { key: 'questions', label: 'بنك الأسئلة' },
+                                            { key: 'scenes', label: 'مشاهد vMix' }
+                                        ].map(t => (
+                                            <button
+                                                key={t.key}
+                                                onClick={() => setDrawerTab(t.key)}
+                                                className={`flex-1 py-2 rounded-lg text-xs font-bold transition-all cursor-pointer ${
+                                                    drawerTab === t.key 
+                                                        ? 'bg-studio-gold text-studio-base font-black' 
+                                                        : 'text-studio-muted hover:text-white'
+                                                }`}
+                                            >
+                                                {t.label}
+                                            </button>
+                                        ))}
+                                    </div>
+
+                                    {/* TAB 1: vMix Live Links */}
+                                    {drawerTab === 'vmix' && (
+                                        <div className="space-y-4">
+                                            <div className="p-3.5 bg-studio-elevated rounded-xl text-xs text-studio-muted leading-relaxed">
+                                                انسخ الرابط التالي وضعه في <strong>vMix → Data Sources</strong> مع تفعيل التحديث التلقائي كل <strong>500 ms</strong>:
+                                            </div>
+
+                                            {[
+                                                {
+                                                    key: 'results',
+                                                    title: 'شيت النتائج المباشر (Results CSV)',
+                                                    url: vmixUrls.resultsCsv || `${window.location.origin}/api/vmix/results.csv`
+                                                },
+                                                {
+                                                    key: 'status',
+                                                    title: 'شيت إجابات الأسئلة (Status CSV)',
+                                                    url: vmixUrls.statusCsv || `${window.location.origin}/api/vmix/status.csv`
+                                                },
+                                                {
+                                                    key: 'liveJson',
+                                                    title: 'رابط البيانات المباشر (Web JSON)',
+                                                    url: vmixUrls.liveJson || `${window.location.origin}/api/vmix/live.json`
+                                                }
+                                            ].map(item => (
+                                                <div key={item.key} className="card-surface p-3.5 space-y-2">
+                                                    <span className="text-xs font-bold text-white">{item.title}</span>
+                                                    <div className="flex gap-2">
+                                                        <input
+                                                            type="text"
+                                                            readOnly
+                                                            value={item.url}
+                                                            dir="ltr"
+                                                            className="flex-1 p-2 bg-studio-base border border-white/5 rounded-lg text-xs font-mono text-studio-gold outline-none"
+                                                        />
+                                                        <button
+                                                            onClick={() => copyUrl(item.key, item.url)}
+                                                            className="px-3 py-2 bg-studio-gold hover:bg-studio-goldHover text-studio-base rounded-lg text-xs font-bold cursor-pointer shrink-0"
+                                                        >
+                                                            {copiedKey === item.key ? 'تم ✓' : 'نسخ'}
+                                                        </button>
+                                                    </div>
+                                                </div>
+                                            ))}
+                                        </div>
+                                    )}
+
+                                    {/* TAB 2: Names Editor */}
+                                    {drawerTab === 'names' && (
+                                        <div className="space-y-4">
+                                            <div className="flex items-center justify-between">
+                                                <span className="text-xs text-studio-muted">تعديل أسماء المتسابقين الـ 8:</span>
+                                                <button
+                                                    onClick={resetNamesDefault}
+                                                    className="text-xs text-studio-gold hover:underline cursor-pointer"
+                                                >
+                                                    استعادة الافتراضية
+                                                </button>
+                                            </div>
+
+                                            <div className="grid grid-cols-2 gap-2.5">
+                                                {[0, 1, 2, 3, 4, 5, 6, 7].map(idx => (
+                                                    <div key={idx} className="space-y-1">
+                                                        <label className="text-[11px] text-studio-muted block">المقعد {idx + 1}</label>
+                                                        <input
+                                                            type="text"
+                                                            value={namesEdit[idx] !== undefined ? namesEdit[idx] : ""}
+                                                            onChange={e => {
+                                                                const next = [...namesEdit];
+                                                                next[idx] = e.target.value;
+                                                                setNamesEdit(next);
+                                                            }}
+                                                            className="w-full p-2 bg-studio-base border border-white/10 rounded-lg text-white font-bold text-xs outline-none focus:border-studio-gold"
+                                                        />
+                                                    </div>
+                                                ))}
+                                            </div>
+
+                                            <button
+                                                onClick={() => saveNames()}
+                                                disabled={loading}
+                                                className="w-full min-h-[44px] bg-studio-gold hover:bg-studio-goldHover text-studio-base font-bold rounded-xl text-sm cursor-pointer shadow-md"
+                                            >
+                                                حفظ وتحديث الأسماء فوراً
+                                            </button>
+                                        </div>
+                                    )}
+
+                                    {/* TAB 3: Questions Bank */}
+                                    {drawerTab === 'questions' && (
+                                        <div className="space-y-4">
+                                            <div
+                                                onClick={() => fileInputRef.current?.click()}
+                                                className="border-2 border-dashed border-studio-gold/30 hover:border-studio-gold rounded-2xl p-6 text-center cursor-pointer transition-all bg-studio-base"
+                                            >
+                                                <input
+                                                    type="file"
+                                                    ref={fileInputRef}
+                                                    accept=".xlsx, .xls, .csv"
+                                                    onChange={handleExcelUpload}
+                                                    className="hidden"
+                                                />
+                                                <div className="w-12 h-12 rounded-xl bg-studio-goldMuted text-studio-gold flex items-center justify-center mx-auto mb-2">
+                                                    <Icons.Upload />
+                                                </div>
+                                                <div className="text-sm font-bold text-white">
+                                                    {uploadFileName ? `تم اختيار: ${uploadFileName}` : "اختر ملف Excel أو CSV"}
+                                                </div>
+                                                <div className="text-xs text-studio-muted mt-1">الأعمدة: Question, A, B, C, D, Correct</div>
+                                            </div>
+
+                                            {parsedQuestions.length > 0 && (
+                                                <div className="space-y-3">
+                                                    <div className="text-sm font-bold text-studio-emerald">
+                                                        ✓ تم قراءة {parsedQuestions.length} سؤال بنجاح
+                                                    </div>
+                                                    <button
+                                                        onClick={commitQuestions}
+                                                        disabled={loading}
+                                                        className="w-full min-h-[44px] bg-studio-gold hover:bg-studio-goldHover text-studio-base font-black rounded-xl text-sm cursor-pointer"
+                                                    >
+                                                        اعتماد وحفظ بنك الأسئلة
+                                                    </button>
+                                                </div>
+                                            )}
+                                        </div>
+                                    )}
+
+                                    {/* TAB 4: vMix Scenes */}
+                                    {drawerTab === 'scenes' && (
+                                        <div className="space-y-3">
+                                            <span className="text-xs text-studio-muted block">اختر جدول المشهد النشط لمخرج vMix:</span>
+                                            {[
+                                                { key: 'seg1', label: 'الفقرة 1 (اختر صح)' },
+                                                { key: 'seg2', label: 'الفقرة 2 (آيات بينات)' },
+                                                { key: 'seg3', label: 'الفقرة 3 (اختر بابك)' },
+                                                { key: 'seg4', label: 'الفقرة 4 (التحدي البصري)' },
+                                                { key: 'seg5', label: 'الفقرة 5 (من أكون؟)' },
+                                                { key: 'total', label: '🏆 النتائج الكلية لجميع الفقرات', gold: true },
+                                            ].map(v => (
+                                                <button
+                                                    key={v.key}
+                                                    onClick={() => performAction('setView', `&view=${v.key}`)}
+                                                    className={`w-full p-3 rounded-xl text-sm font-bold transition-all text-right cursor-pointer ${
+                                                        v.gold 
+                                                            ? 'bg-studio-gold text-studio-base font-black' 
+                                                            : 'card-surface hover:bg-studio-elevated text-white'
+                                                    }`}
+                                                >
+                                                    {v.label}
+                                                </button>
+                                            ))}
+                                        </div>
+                                    )}
+                                </div>
+
+                                <div className="pt-4 border-t border-white/5">
+                                    <button
+                                        onClick={() => setIsDrawerOpen(false)}
+                                        className="w-full py-2.5 bg-studio-elevated text-studio-muted hover:text-white rounded-xl text-xs font-bold cursor-pointer"
+                                    >
+                                        إغلاق اللوحة
+                                    </button>
+                                </div>
+                            </div>
+                        </div>
+                    )}
+
+                    {/* Safe Stop Contest Confirmation Modal */}
+                    {showStopConfirm && (
+                        <div className="fixed inset-0 z-50 drawer-overlay flex items-center justify-center p-4">
+                            <div className="card-surface p-6 sm:p-8 max-w-sm w-full space-y-4 text-center">
+                                <h3 className="text-lg font-bold text-white">إيقاف المسابقة والعودة للاستعداد؟</h3>
+                                <p className="text-xs text-studio-muted leading-relaxed">
+                                    سيتم إغلاق استقبال الإجابات وإيقاف البث لتابلت المتسابقين.
+                                </p>
+                                <div className="grid grid-cols-2 gap-3 pt-2">
+                                    <button
+                                        onClick={() => setShowStopConfirm(false)}
+                                        className="py-2.5 rounded-xl bg-studio-elevated text-white text-xs font-bold cursor-pointer"
+                                    >
+                                        إلغاء
+                                    </button>
+                                    <button
+                                        onClick={() => toggleGameStatus(false)}
+                                        className="py-2.5 rounded-xl bg-studio-rose text-white text-xs font-bold cursor-pointer"
+                                    >
+                                        تأكيد الإيقاف
+                                    </button>
+                                </div>
+                            </div>
+                        </div>
+                    )}
+
+                    {/* Custom Score Modal */}
+                    {customModalPid && (
+                        <div className="fixed inset-0 z-50 drawer-overlay flex items-center justify-center p-4">
+                            <div className="card-surface p-6 max-w-xs w-full space-y-4">
+                                <h3 className="text-sm font-bold text-white">
+                                    نقاط للمتسابق {customModalPid} ({playerNames[customModalPid - 1]})
+                                </h3>
+                                <input
+                                    type="number"
+                                    value={customPointsInput}
+                                    onChange={e => setCustomPointsInput(e.target.value)}
+                                    autoFocus
+                                    className="w-full p-3 bg-studio-base border border-studio-gold/40 rounded-xl text-studio-gold font-mono font-black text-center text-3xl outline-none"
+                                />
+                                <div className="grid grid-cols-2 gap-2">
+                                    <button onClick={() => setCustomModalPid(null)} className="py-2 rounded-lg bg-studio-elevated text-white text-xs font-bold cursor-pointer">
+                                        إلغاء
+                                    </button>
+                                    <button
+                                        onClick={() => {
+                                            if (customPointsInput) {
+                                                performAction('addSeg5', `&playerId=${customModalPid}&points=${customPointsInput}`);
+                                            }
+                                            setCustomModalPid(null);
+                                        }}
+                                        className="py-2 rounded-lg bg-studio-gold text-studio-base font-bold text-xs cursor-pointer"
+                                    >
+                                        تأكيد
+                                    </button>
+                                </div>
+                            </div>
+                        </div>
+                    )}
+
+                    {/* 3-Second Undo Toast for Score Changes */}
+                    {undoToast && (
+                        <div className="fixed bottom-6 left-6 z-50 animate-fade-in flex items-center gap-4 bg-studio-surface border-2 border-studio-gold p-4 rounded-2xl shadow-2xl">
+                            <div className="flex items-center gap-2 text-sm font-bold text-white">
+                                <span className="w-2.5 h-2.5 rounded-full bg-studio-emerald animate-pulse"></span>
+                                <span>{undoToast.desc}</span>
+                            </div>
+                            <button
+                                onClick={undoToast.undo}
+                                className="px-4 py-1.5 rounded-xl bg-studio-rose text-white hover:bg-rose-600 text-xs font-black flex items-center gap-1.5 cursor-pointer shadow active:scale-95 transition-all"
+                            >
+                                <Icons.Undo />
+                                <span>تراجع (Undo)</span>
+                            </button>
+                        </div>
+                    )}
+
+                    {/* Toast Alert */}
+                    {scoreNotice && (
+                        <div className="fixed bottom-6 left-1/2 -translate-x-1/2 z-50 bg-studio-elevated border border-studio-gold/60 text-white px-5 py-3 rounded-xl shadow-xl flex items-center gap-3 text-sm font-bold animate-fade-in">
+                            <span className="text-studio-gold">💡</span>
+                            <span>{scoreNotice}</span>
+                        </div>
+                    )}
+                </div>
+            );
+        };
+
+        // ==========================================
+        // 3. ENTRY PORTAL (Clean 8-Seat Grid + Director)
+        // ==========================================
+        const SetupView = ({ onGo, isLocal, setIsLocal, url, setUrl, playerNames = [] }) => {
+            const [showPassModal, setShowPassModal] = useState(false);
+            const [pass, setPass] = useState("");
+
+            const handleGo = (role, playerId) => {
+                if (!isLocal && !url) {
+                    alert("يرجى إدخال رابط Google Script أو تفعيل الوضع المحلي");
+                    return;
+                }
+                onGo(url, role, playerId);
+            };
+
+            return (
+                <div className="max-w-5xl mx-auto py-8 px-4 sm:px-6 space-y-8 animate-fade-in">
+                    {/* Centered Brand Mark */}
+                    <div className="text-center space-y-2">
+                        <div className="w-16 h-16 rounded-2xl bg-studio-gold text-studio-base font-amiri font-bold text-4xl flex items-center justify-center mx-auto shadow-lg">
+                            م
+                        </div>
+                        <h1 className="text-3xl font-black text-white">مسابقة مشكاة</h1>
+                        <p className="text-studio-muted text-sm">منصة البث التلفزيوني والربط اللحظي مع برنامج vMix</p>
+                    </div>
+
+                    {/* Local Connection Toggle Card */}
+                    <div className="card-surface p-4 flex items-center justify-between gap-4 max-w-xl mx-auto">
+                        <div className="flex items-center gap-3">
+                            <span className={`w-3 h-3 rounded-full ${isLocal ? 'bg-studio-emerald animate-pulse' : 'bg-studio-muted'}`}></span>
+                            <div>
+                                <div className="text-sm font-bold text-white">
+                                    {isLocal ? 'الخادم المحلي المباشر (vMix)' : 'الوضع السحابي (Google Sheets)'}
+                                </div>
+                                <div className="text-xs text-studio-muted">
+                                    {isLocal ? 'اتصال داخلي فائق السرعة بدون إنترنت وبدون تأخير' : 'ربط عبر الإنترنت'}
+                                </div>
+                            </div>
+                        </div>
+
+                        <button
+                            onClick={() => setIsLocal(!isLocal)}
+                            className={`min-h-[36px] px-3.5 rounded-lg text-xs font-bold transition-all cursor-pointer ${
+                                isLocal ? 'bg-studio-emerald/20 text-studio-emerald border border-studio-emerald/40' : 'bg-studio-elevated text-studio-muted'
+                            }`}
+                        >
+                            {isLocal ? 'متصل محلياً' : 'تبديل للمحلي'}
+                        </button>
+                    </div>
+
+                    {/* Role Selection: Grid of 8 Contestant Seats + Director Card */}
+                    <div className="space-y-4">
+                        <div className="flex items-center justify-between">
+                            <span className="text-sm font-bold text-white">اختر مقعد المتسابق أو غرفة المخرج للدخول:</span>
+                            <span className="text-xs text-studio-muted">8 مقاعد مجهزة للمسرح</span>
+                        </div>
+
+                        {/* Top: Director Card */}
+                        <div
+                            onClick={() => setShowPassModal(true)}
+                            className="card-surface hover:bg-studio-elevated border-studio-gold/30 hover:border-studio-gold p-5 rounded-2xl flex items-center justify-between gap-4 cursor-pointer transition-all shadow-md group"
+                        >
+                            <div className="flex items-center gap-4">
+                                <div className="w-12 h-12 rounded-xl bg-studio-gold text-studio-base flex items-center justify-center font-bold">
+                                    <Icons.Tv />
+                                </div>
+                                <div>
+                                    <div className="text-base font-extrabold text-white group-hover:text-studio-gold transition-colors">
+                                        غرفة مخرج المسابقة (Director Control Room)
+                                    </div>
+                                    <div className="text-xs text-studio-muted">
+                                        لوحة التحكم الشاملة، المؤقت، رصد الإجابات، والربط مع vMix
+                                    </div>
+                                </div>
+                            </div>
+                            <span className="text-xs font-bold text-studio-gold bg-studio-goldMuted px-3 py-1.5 rounded-lg">
+                                الدخول بكلمة المرور ←
+                            </span>
+                        </div>
+
+                        {/* Grid of 8 Seat Cards */}
+                        <div className="grid grid-cols-2 sm:grid-cols-4 gap-3.5">
+                            {[1, 2, 3, 4, 5, 6, 7, 8].map(n => {
+                                const rawName = playerNames?.[n - 1];
+                                const contestantName = (rawName && rawName.trim()) ? rawName.trim() : `المتسابق ${n}`;
+                                return (
+                                    <button
+                                        key={n}
+                                        onClick={() => handleGo('PLAYER', n)}
+                                        className="card-surface hover:bg-studio-elevated border-white/5 hover:border-studio-gold/50 p-4 rounded-xl flex flex-col items-center justify-center text-center space-y-2 cursor-pointer transition-all active:scale-[0.98] group"
+                                    >
+                                        <div className="w-10 h-10 rounded-xl bg-studio-elevated group-hover:bg-studio-gold text-studio-gold group-hover:text-studio-base font-black font-mono text-base flex items-center justify-center transition-colors">
+                                            {n}
+                                        </div>
+                                        <div className="text-sm font-bold text-white group-hover:text-studio-gold transition-colors truncate w-full">
+                                            {contestantName}
+                                        </div>
+                                        <div className="text-[11px] text-studio-muted">المقعد {n}</div>
+                                    </button>
+                                );
+                            })}
+                        </div>
+                    </div>
+
+                    {/* Password Modal for Director */}
+                    {showPassModal && (
+                        <div className="fixed inset-0 z-50 drawer-overlay flex items-center justify-center p-4">
+                            <div className="card-surface p-6 sm:p-8 max-w-xs w-full space-y-4 text-center animate-fade-in">
+                                <h3 className="text-sm font-bold text-studio-gold">كلمة مرور غرفة المخرج</h3>
+                                <input
+                                    type="password"
+                                    value={pass}
+                                    onChange={e => setPass(e.target.value)}
+                                    placeholder="••••"
+                                    autoFocus
+                                    onKeyDown={e => e.key === 'Enter' && (pass === ADMIN_PASSWORD ? handleGo('ADMIN') : alert("كلمة المرور غير صحيحة"))}
+                                    className="w-full p-3.5 bg-studio-base border border-white/10 rounded-xl text-center text-2xl font-mono text-studio-gold outline-none focus:border-studio-gold tracking-widest"
+                                />
+                                <div className="grid grid-cols-2 gap-2">
+                                    <button
+                                        onClick={() => setShowPassModal(false)}
+                                        className="py-2.5 rounded-lg bg-studio-elevated text-studio-muted hover:text-white text-xs font-bold cursor-pointer"
+                                    >
+                                        إلغاء
+                                    </button>
+                                    <button
+                                        onClick={() => pass === ADMIN_PASSWORD ? handleGo('ADMIN') : alert("كلمة المرور غير صحيحة")}
+                                        className="py-2.5 rounded-lg bg-studio-gold hover:bg-studio-goldHover text-studio-base text-xs font-black cursor-pointer"
+                                    >
+                                        تأكيد الدخول
+                                    </button>
+                                </div>
+                            </div>
+                        </div>
+                    )}
+                </div>
+            );
+        };
+
+        // ==========================================
+        // 4. APP SHELL
+        // ==========================================
+        const App = () => {
+            const [mode, setMode] = useState('SETUP');
+            const [url, setUrl] = useState('');
+            const [pId, setPId] = useState(null);
+            const [isLocal, setIsLocal] = useState(true);
+            const [playerNames, setPlayerNames] = useState([
+                "سمية أمير", "أسماء دليل", "لينة بن ناجي", "بسمة حلاب",
+                "أيوب مصري", "أسامة الوناس", "زيد كموش", "راشدي ياسين"
+            ]);
+
+            const fetchNames = async () => {
+                try {
+                    const res = await fetch('/api/getStatus');
+                    const json = await res.json();
+                    if (json.success && json.data?.playerNames?.length) {
+                        setPlayerNames(json.data.playerNames);
+                    }
+                } catch (e) {}
+            };
+
+            useEffect(() => {
+                const savedUrl = localStorage.getItem('gas_url');
+                if (savedUrl) setUrl(savedUrl);
+                fetchNames();
+            }, []);
+
+            const onGo = (u, m, p) => {
+                setUrl(u);
+                setMode(m);
+                setPId(p);
+                if (u) localStorage.setItem('gas_url', u);
+            };
+
+            const getApiUrl = (action, params = {}) => {
+                if (isLocal) {
+                    const searchParams = new URLSearchParams(params);
+                    return `/api/${action}?${searchParams.toString()}`;
+                }
+                const searchParams = new URLSearchParams({ action, ...params });
+                return `${url}?${searchParams.toString()}`;
+            };
+
+            const currentContestantName = (pId && playerNames && playerNames[pId - 1]) ? playerNames[pId - 1] : `المتسابق ${pId}`;
+
+            return (
+                <div className="min-h-screen flex flex-col text-studio-text">
+                    <main className="flex-grow">
+                        {mode === 'SETUP' && (
+                            <SetupView
+                                onGo={onGo}
+                                isLocal={isLocal}
+                                setIsLocal={setIsLocal}
+                                url={url}
+                                setUrl={setUrl}
+                                playerNames={playerNames}
+                            />
+                        )}
+                        {mode === 'ADMIN' && (
+                            <div className="space-y-2">
+                                <div className="px-6 pt-3 flex items-center justify-between text-xs text-studio-muted border-b border-white/5 pb-2">
+                                    <div className="flex items-center gap-2">
+                                        <span className="font-bold text-white">مسابقة مشكاة</span>
+                                        <span>·</span>
+                                        <span>غرفة المخرج</span>
+                                    </div>
+                                    <button
+                                        onClick={() => { setMode('SETUP'); fetchNames(); }}
+                                        className="text-xs text-studio-gold hover:underline cursor-pointer"
+                                    >
+                                        تبديل الواجهة ←
+                                    </button>
+                                </div>
+                                <AdminView getApiUrl={getApiUrl} />
+                            </div>
+                        )}
+                        {mode === 'PLAYER' && (
+                            <div className="space-y-2">
+                                <div className="px-6 pt-3 flex items-center justify-between text-xs text-studio-muted border-b border-white/5 pb-2">
+                                    <div className="flex items-center gap-2">
+                                        <span className="font-bold text-white">مسابقة مشكاة</span>
+                                        <span>·</span>
+                                        <span className="text-studio-gold">{currentContestantName}</span>
+                                    </div>
+                                    <button
+                                        onClick={() => { setMode('SETUP'); fetchNames(); }}
+                                        className="text-xs text-studio-muted hover:text-white cursor-pointer"
+                                    >
+                                        خروج
+                                    </button>
+                                </div>
+                                <PlayerView getApiUrl={getApiUrl} playerId={pId} />
+                            </div>
+                        )}
+                    </main>
+                </div>
+            );
+        };
+
+        ReactDOM.createRoot(document.getElementById('root')).render(<App />);
+    </script>
+</body>
+</html>

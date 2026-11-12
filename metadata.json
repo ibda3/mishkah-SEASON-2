@@ -1,0 +1,8 @@
+{
+  "name": "Quiz مشكاة",
+  "description": "نظام مسابقات احترافي متكامل مصمم للربط مع vMix عبر Google Sheets، يدعم 8 متسابقين مع لوحة تحكم إدارية.",
+  "requestFramePermissions": [
+    "camera",
+    "microphone"
+  ]
+}
